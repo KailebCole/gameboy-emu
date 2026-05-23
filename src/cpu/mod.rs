@@ -43,18 +43,47 @@ impl CPU {
 
     // Main execution loop for the CPU, called every frame
     pub fn step(&mut self) {
+        if self.halted {
+            self.ticks += 4; // HALT consumes 4 cycles per step
+            return;
+        }
+
         let opcode = self.mmu.fetch_byte(&mut self.registers.pc);
         match opcode {
+            // Miscellaneous Operations and CPU Control
             0x00 => self.nop(), 
-            0x10 => self.stop(opcode), 
+            0x10 => self.stop(), 
+            0x76 => self.halt(), 
+            0xCB => self.execute_cb(),
+            0xF3 => self.di(),
+            0xFB => self.ei(),
+
+            // Load Operations
+            0x01|0x11|0x21|0x31 => self.ld_r16_i16(opcode),
+            0x06|0x0E|0x16|0x1E|0x26|0x2E|0x36|0x3E => self.ld_r8_i8(opcode), 
+            0x08 => self.ld_a16_sp(),
+            0x0A|0x1A => self.ld_a_r16(opcode),
+            0x02|0x12 => self.ld_r16_a(opcode),
             0x22 => self.ld_hli_a(),
             0x2A => self.ld_a_hli(),
             0x32 => self.ld_hld_a(),
             0x3A => self.ld_a_hld(),
+            0x40..=0x75 | 0x77..=0x7F => self.ld_r8_r8(opcode), 
+            0xE0 => self.ldh_a8_a(),
+            0xE2 => self.ldh_c_a(),
+            0xEA => self.ld_a16_a(),
+            0xF0 => self.ldh_a_a8(),
+            0xF2 => self.ldh_a_c(),
+            0xF8 => self.ld_hl_sp_add_s8(),
+            0xF9 => self.ld_sp_hl(),
+            0xFA => self.ld_a_a16(),
 
-            0x76 => self.halt(), 
-
-            0x40..=0x75 | 0x77..=0x7F => self.ld_r8_r8(opcode),   
+            // ALU Operations
+            0x03|0x13|0x23|0x33 => self.inc_r16(opcode),
+            0x04|0x14|0x24|0x34|0x0C|0x1C|0x2C|0x3C => self.inc_r8(opcode),
+            0x05|0x15|0x25|0x35|0x0D|0x1D|0x2D|0x3D => self.dec_r8(opcode),
+            0x09|0x19|0x29|0x39 => self.add_hl_r16(opcode),
+            0x0B|0x1B|0x2B|0x3B => self.dec_r16(opcode),
             0x80..=0x87 => self.add_r8(opcode),   
             0x88..=0x8F => self.adc_r8(opcode),
             0x90..=0x97 => self.sub_r8(opcode),
@@ -63,22 +92,67 @@ impl CPU {
             0xA8..=0xAF => self.xor_r8(opcode),
             0xB0..=0xB7 => self.or_r8(opcode),
             0xB8..=0xBF => self.cp_r8(opcode),
+            0xC6 => self.add_i8(),
+            0xCE => self.adc_i8(),
+            0xD6 => self.sub_i8(),
+            0xE6 => self.and_i8(),
+            0xE8 => self.add_sp_s8(),
+            0xEE => self.xor_i8(),
+            0xF6 => self.or_i8(),
+            0xFE => self.cp_i8(),
 
+            // Rotates, Shifts, Flag Operations
+            0x07 => self.rlca(),
+            0x0F => self.rrca(),
+            0x17 => self.rla(),
+            0x1F => self.rra(),
+            0x27 => self.daa(),
+            0x2F => self.cpl(),
+            0x37 => self.scf(),
+            0x3F => self.ccf(),
+
+            // Jumps and Calls
+            0x18 => self.jr_s8(),
+            0x20|0x28|0x30|0x38 => self.jr_c_s8(opcode),
+            0xC0|0xC8|0xD0|0xD8 => self.ret_c(opcode),
+            0xC2|0xCA|0xD2|0xDA => self.jp_c_a16(opcode),
+            0xC3 => self.jp_a16(),
+            0xC4|0xCC|0xD4|0xDC => self.call_cond_a16(opcode),
             0xC7 => self.rst_tgt3(0x00),
-            0xCB => self.execute_cb(),
+            0xC9 => self.ret(),
+            0xCD => self.call_a16(),
             0xCF => self.rst_tgt3(0x08),
             0xD7 => self.rst_tgt3(0x10),
+            0xD9 => self.reti(),
+            0xDF => self.rst_tgt3(0x18),
+            0xE7 => self.rst_tgt3(0x20),
+            0xE9 => self.jp_hl(),
+            0xEF => self.rst_tgt3(0x28),
+            0xF7 => self.rst_tgt3(0x30),
+            0xFF => self.rst_tgt3(0x38),
+
+            // Stack Operations
+            0xC1|0xD1|0xE1|0xF1 => self.pop_r16(opcode),
+            0xC5|0xD5|0xE5|0xF5 => self.push_r16(opcode),
+
             _ => panic!("Unimplemented opcode: 0x{:02X}", opcode),
         }
 
         // Handle delayed interrupt enabling/disabling
-        if self.di > 0 {
+        if self.di == 1 {
             self.ime = false;
             self.di = 0;
         }
-        if self.ei > 0 {
+        else if self.di > 1 {
+            self.di -= 1;
+        }
+
+        if self.ei == 1 {
             self.ime = true;
             self.ei = 0;
+        }
+        else if self.ei > 1 {
+            self.ei -= 1;
         }
     }
 
@@ -676,9 +750,17 @@ impl CPU {
     }
 
     // Jump to the address specified by a 16-bit immediate if the carry flag is 1
-    fn jp_c_a16(&mut self) {
+    fn jp_c_a16(&mut self, opcode: u8) {
         let addr = self.mmu.fetch_word(&mut self.registers.pc);
-        if self.registers.f.carry {
+        let condition = match (opcode >> 4) & 0b111 {
+            0 => !self.registers.f.zero, // NZ
+            1 => self.registers.f.zero,  // Z
+            2 => !self.registers.f.carry, // NC
+            3 => self.registers.f.carry,  // C
+            _ => unreachable!(),
+        };
+
+        if condition {
             self.registers.pc = addr;
         }
     }
@@ -695,9 +777,17 @@ impl CPU {
     }
 
     // Jump s8 steps from current PC if carry flag is 1
-    fn jr_c_s8(&mut self) {
+    fn jr_c_s8(&mut self, opcode: u8) {
         let steps = self.mmu.fetch_byte(&mut self.registers.pc) as i8;
-        if self.registers.f.carry {
+        let condition = match (opcode >> 4) & 0b111 {
+            0 => !self.registers.f.zero, // NZ
+            1 => self.registers.f.zero,  // Z
+            2 => !self.registers.f.carry, // NC
+            3 => self.registers.f.carry,  // C
+            _ => unreachable!(),
+        };
+
+        if condition {
             self.registers.pc = ((self.registers.pc as i32) + (steps as i32)) as u16;
         }
     }
@@ -734,8 +824,16 @@ impl CPU {
     }
 
     // Return from a subroutine if the carry flag is 1
-    fn ret_c(&mut self) {
-        if self.registers.f.carry {
+    fn ret_c(&mut self, opcode: u8) {
+        let condition = match (opcode >> 4) & 0b111 {
+            0 => !self.registers.f.zero, // NZ
+            1 => self.registers.f.zero,  // Z
+            2 => !self.registers.f.carry, // NC
+            3 => self.registers.f.carry,  // C
+            _ => unreachable!(),
+        };
+
+        if condition {
             self.registers.pc = self.pop_u16();
         }
     }
@@ -754,43 +852,43 @@ impl CPU {
     }
 
     // Stop the CPU and LCD until a button is pressed, and set the halted flag to true
-    fn stop(&mut self, opcode: u8) {
+    fn stop(&mut self) {
         self.halted = true;
-        self.registers.pc += 1; // Skip the next byte which is part of the STOP instruction
+        _ = self.mmu.fetch_byte(&mut self.registers.pc)
     }
 /* #endregion */
 
 
 /* #region Bit Operations */
-    fn ccf(&mut self, opcode: u8) {
+    fn ccf(&mut self) {
         
     }
 
-    fn cpl(&mut self, opcode: u8) {
+    fn cpl(&mut self) {
         
     }
 
-    fn daa(&mut self, opcode: u8) {
+    fn daa(&mut self) {
         
     }
 
-    fn rla(&mut self, opcode: u8) {
+    fn rla(&mut self) {
         
     }
 
-    fn rlca(&mut self, opcode: u8) {
+    fn rlca(&mut self) {
         
     }
 
-    fn rra(&mut self, opcode: u8) {
+    fn rra(&mut self) {
         
     }
 
-    fn rrca(&mut self, opcode: u8) {
+    fn rrca(&mut self) {
         
     }
 
-    fn scf(&mut self, opcode: u8) {
+    fn scf(&mut self) {
         
     }
 /* #endregion */
