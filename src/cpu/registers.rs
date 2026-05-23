@@ -24,10 +24,6 @@ const FLAG_SUBTRACT: u8 = 6;
 const FLAG_HALF_CARRY: u8 = 5;
 const FLAG_CARRY: u8 = 4;
 
-pub enum Reg{
-    B, C, D, E, H, L, HL, A
-}
-
 impl Registers {
     pub fn new() -> Self {
         Registers {
@@ -48,43 +44,6 @@ impl Registers {
             pc: 0x0000, // Program Counter starts at the beginning of ROM
         }
     }
-    pub fn get_bc(&self) -> u16 {
-        ((self.b as u16) << 8) | (self.c as u16)
-    }
-    pub fn get_de(&self) -> u16 {
-        ((self.d as u16) << 8) | (self.e as u16)
-    }
-    pub fn get_hl(&self) -> u16 {
-        ((self.h as u16) << 8) | (self.l as u16)
-    }
-
-    pub fn set_bc(&mut self, value: u16) {
-        self.b = (value >> 8) as u8;
-        self.c = (value & 0xFF) as u8;
-    }
-    pub fn set_de(&mut self, value: u16) {
-        self.d = (value >> 8) as u8;
-        self.e = (value & 0xFF) as u8;
-    }
-    pub fn set_hl(&mut self, value: u16) {
-        self.h = (value >> 8) as u8;
-        self.l = (value & 0xFF) as u8;
-    }
-
-    pub fn decode_reg(&self, code: u8) -> Reg {
-        match code {
-            0x00 => Reg::B,
-            0x01 => Reg::C,
-            0x02 => Reg::D,
-            0x03 => Reg::E,
-            0x04 => Reg::H,
-            0x05 => Reg::L,
-            0x06 => Reg::HL,
-            0x07 => Reg::A,
-            _ => unreachable!(),
-        }
-    }
-
 }
 
 impl std::convert::From<FlagsRegister> for u8 {
