@@ -52,4 +52,16 @@ impl MMU {
             _ => {}, // Ignore writes to unmapped addresses
         }
     }
+
+    pub fn fetch_byte(&mut self, pc: &mut u16) -> u8 {
+        let byte = self.read_byte(*pc);
+        *pc += 1;
+        byte
+    }
+
+    pub fn fetch_word(&mut self, pc: &mut u16) -> u16 {
+        let low = self.fetch_byte(pc) as u16;
+        let high = self.fetch_byte(pc) as u16;
+        (high << 8) | low
+    }
 }
