@@ -27,11 +27,11 @@ pub struct CPU {
     registers: registers::Registers,
     halted: bool,
     ime: bool,
-    ei: u8,
-    di: u8,
+    ime_next: bool,
+    ime_delay: u8,
     ticks: u32,
     m_cycle:u32,
-    mmu: mmu::MMU,
+    pub mmu: mmu::MMU,
 }
 
 impl CPU {
@@ -40,28 +40,31 @@ impl CPU {
             registers: registers::Registers::new(),
             halted: false,
             ime: false,
-            ei: 0,
-            di: 0,
+            ime_next: false,
+            ime_delay: 0,
             ticks: 0,
             m_cycle: 0,
-            mmu: mmu,
+            mmu,
         }
     }
 
     // Main execution loop for the CPU, called every frame
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> u8 {
         if self.halted {
             self.ticks += 4; // HALT consumes 4 cycles per step
-            return;
+            return 4;
         }
 
         let opcode = self.mmu.fetch_byte(&mut self.registers.pc);
+        let entry = opcodes::opcodes_map.get(&opcode);                     
+        let mut cycles = entry.map(|op| op.cycles);
+
         match opcode {
             // Miscellaneous Operations and CPU Control
             0x00 => self.nop(), 
             0x10 => self.stop(), 
             0x76 => self.halt(), 
-            0xCB => self.execute_cb(),
+            0xCB => cycles = Some(self.execute_cb()),
             0xF3 => self.di(),
             0xFB => self.ei(),
 
@@ -159,26 +162,21 @@ impl CPU {
         }
 
         // Handle delayed interrupt enabling/disabling
-        if self.di == 1 {
-            self.ime = false;
-            self.di = 0;
-        }
-        else if self.di > 1 {
-            self.di -= 1;
+        if self.ime_delay > 0 {
+            self.ime_delay -= 1;
+            if self.ime_delay == 0 {
+                self.ime = self.ime_next;
+            }
         }
 
-        if self.ei == 1 {
-            self.ime = true;
-            self.ei = 0;
-        }
-        else if self.ei > 1 {
-            self.ei -= 1;
-        }
+        return cycles.unwrap_or(4);
     }
 
     // Execute CB-prefixed opcodes for bit manipulation and shifts/rotates
-    fn execute_cb(&mut self) {
+    fn execute_cb(&mut self) -> u8 {
         let opcode = self.mmu.fetch_byte(&mut self.registers.pc);
+        let entry = opcodes::cb_opcodes_map.get(&opcode);
+        let cycles = entry.map(|op| op.cycles).unwrap_or(2); // Default to 8 cycles for CB ops
 
         match opcode {
             0x00..=0x07 => self.rlc_r8(opcode),
@@ -193,6 +191,8 @@ impl CPU {
             0x80..=0xBF => self.res_b_r8(opcode),
             0xC0..=0xFF => self.set_b_r8(opcode),
         }
+
+        return cycles;
     }
 
     // Read the value of an 8-bit register or memory location if HL is specified
@@ -351,16 +351,13 @@ impl CPU {
     fn adc_a(&mut self, value: u8) {
         let a = self.registers.a;
         let carry = self.registers.f.carry as u8;
-
-        let (tmp, carry1) = a.overflowing_add(value);
-        let (result, carry2) = tmp.overflowing_add(carry);
-
-        self.write_r8(Reg8::A, result);
+        let result = a.wrapping_add(value).wrapping_add(carry);
+        self.registers.a = result;
 
         self.registers.f.zero = result == 0;
         self.registers.f.subtract = false;
         self.registers.f.half_carry = (a & 0xF) + (value & 0xF) + carry > 0xF;
-        self.registers.f.carry = carry1 || carry2;
+        self.registers.f.carry = (a as u16) + (value as u16) + (carry as u16) > 0xFF;
     }
 
     // ADC with an immediate 8-bit value
@@ -417,14 +414,13 @@ impl CPU {
     fn add_sp_s8(&mut self) {
         let sp = self.registers.sp;
         let offset = self.mmu.fetch_byte(&mut self.registers.pc) as i8;
-        let result = (sp as i32).wrapping_add(offset as i32) as u16;
-        let offset_u8 = offset as u8;
+        let result = sp.wrapping_add(offset as u16 as u16);
         self.registers.sp = result;
 
         self.registers.f.zero = false;
         self.registers.f.subtract = false;
-        self.registers.f.half_carry = (sp & 0xF) + ((offset_u8 as u16) & 0xF) > 0xF;
-        self.registers.f.carry = ((sp & 0xFF) + (offset_u8 as u16)) > 0xFF;
+        self.registers.f.half_carry = (sp & 0xFF) + ((offset as i16 as u16) & 0xFF) > 0xFF;
+        self.registers.f.carry = ((sp & 0xFF) + (offset as i16 as u16) & 0xFF) > 0xFF;
     }
 
     // Main AND operation on Accumulator
@@ -506,7 +502,7 @@ impl CPU {
 
         self.registers.f.zero = result == 0;
         self.registers.f.subtract = false;
-        self.registers.f.half_carry = (value & 0xF) + 1 == 0xF;
+        self.registers.f.half_carry = (value & 0xF) + 1 > 0xF;
     }
 
     // Main OR operation on Accumulator
@@ -538,16 +534,14 @@ impl CPU {
     fn sbc_a(&mut self, value: u8) {
         let a = self.registers.a;
         let carry = self.registers.f.carry as u8;
+        let result = a.wrapping_sub(value).wrapping_sub(carry);
 
-        let (tmp, carry1) = a.overflowing_sub(value);
-        let (result, carry2) = tmp.overflowing_sub(carry);
-
-        self.write_r8(Reg8::A, result);
+        self.registers.a = result;
 
         self.registers.f.zero = result == 0;
-        self.registers.f.subtract = false;
+        self.registers.f.subtract = true;
         self.registers.f.half_carry = (a & 0xF) < ((value & 0xF) + carry);
-        self.registers.f.carry = carry1 || carry2;
+        self.registers.f.carry = (a as u16) < (value as u16) + (carry as u16);
     }
 
     // SBC with an immediate 8-bit value
@@ -664,15 +658,16 @@ impl CPU {
     // Load the value of SP plus a signed 8-bit immediate into HL
     fn ld_hl_sp_add_s8(&mut self) {
         let imm = self.mmu.fetch_byte(&mut self.registers.pc);
-        let offset = imm as i8;
         let sp = self.registers.sp;
-        let result = sp.wrapping_add(offset as i16 as u16);
+        let result = sp.wrapping_add(imm as i16 as u16);
         self.write_r16(Reg16::HL, result);
+        let sp_low = sp & 0xFF;
+        let imm_u8 = imm as u8;
 
         self.registers.f.zero = false;
         self.registers.f.subtract = false;
-        self.registers.f.half_carry = ((sp & 0x0F) + ((imm as u16) & 0x0F)) > 0x0F;
-        self.registers.f.carry = ((sp & 0xFF) + (imm as u16)) > 0xFF;
+        self.registers.f.half_carry = ((sp_low & 0xF) as u8) + ((imm_u8 & 0xF) as u8) > 0xF;
+        self.registers.f.carry = ((sp_low as u16) + (imm_u8 as u16)) > 0xFF;
     }
 
     // Load the value of SP into the memory address specified by a 16-bit immediate
@@ -777,12 +772,14 @@ impl CPU {
 
     // Disable interrupts after next op by clearing the IME flag, and set the DI delay counter to 1
     fn di(&mut self) {
-        self.di = 1;
+        self.ime_next = false;
+        self.ime_delay = 2;
     }
 
     // Enable interrupts after next op by setting the IME flag, and set the EI delay counter to 1
     fn ei(&mut self) {
-        self.ei = 1;
+        self.ime_next = true;
+        self.ime_delay = 2;
     }
 
     // HALT the CPU until an interrupt occurs, and set the halted flag to true
@@ -820,7 +817,7 @@ impl CPU {
     // Jump s8 steps from current PC
     fn jr_s8(&mut self) {
         let steps = self.mmu.fetch_byte(&mut self.registers.pc) as i8;
-        self.registers.pc = ((self.registers.pc as i32) + (steps as i32)) as u16;
+        self.registers.pc = self.registers.pc.wrapping_add(steps as i16 as u16);
     }
 
     // Do Nothing
@@ -858,6 +855,8 @@ impl CPU {
     // Return and enable interrupts
     fn reti(&mut self) {
         self.registers.pc = self.pop_u16();
+        self.ime_next = true;
+        self.ime_delay = 0;
         self.ime = true;
     }
 
@@ -946,6 +945,7 @@ impl CPU {
         let b7 = (value & 0x80) != 0;
         let carry = self.registers.f.carry as u8;
         let result = (value << 1) | carry;
+        self.write_r8(reg, result);
 
         self.registers.f.zero = result == 0;
         self.registers.f.subtract = false;
