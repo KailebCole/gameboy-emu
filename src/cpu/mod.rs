@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use crate::mmu;
+use crate::{cpu::registers::FlagsRegister, mmu::MMU};
 mod registers;
 mod opcodes;
 
 // List of 8-bit registers for easier access
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum Reg8{
     B, C, D, E, H, L, HL, A
 }
@@ -31,12 +31,12 @@ pub struct CPU {
     ime_delay: u8,
     ticks: u32,
     m_cycle:u32,
-    pub mmu: mmu::MMU,
+    pub mmu: MMU,
 }
 
 impl CPU {
-    pub fn new(mmu: mmu::MMU) -> Self {
-        CPU {
+    pub fn new(mmu: MMU) -> Self {
+        Self {
             registers: registers::Registers::new(),
             halted: false,
             ime: false,
@@ -49,11 +49,20 @@ impl CPU {
     }
 
     // Main execution loop for the CPU, called every frame
-    pub fn step(&mut self) -> u8 {
+    pub fn step(&mut self) -> u32 {
         if self.halted {
             self.ticks += 4; // HALT consumes 4 cycles per step
             return 4;
         }
+
+        println!(
+            "PC={:04X} Z={} N={} H={} C={}",
+            self.registers.pc,
+            self.registers.f.zero,
+            self.registers.f.subtract,
+            self.registers.f.half_carry,
+            self.registers.f.carry
+        );
 
         let opcode = self.mmu.fetch_byte(&mut self.registers.pc);
         let entry = opcodes::opcodes_map.get(&opcode);                     
@@ -161,6 +170,17 @@ impl CPU {
             _ => panic!("Unimplemented opcode: 0x{:02X}", opcode),
         }
 
+        self.registers.f = FlagsRegister::unpack(self.registers.f.pack());
+
+        println!(
+            "F: Z={} N={} H={} C={}",
+            self.registers.f.zero,
+            self.registers.f.subtract,
+            self.registers.f.half_carry,
+            self.registers.f.carry
+        );
+
+
         // Handle delayed interrupt enabling/disabling
         if self.ime_delay > 0 {
             self.ime_delay -= 1;
@@ -169,11 +189,11 @@ impl CPU {
             }
         }
 
-        return cycles.unwrap_or(4);
+        return cycles.unwrap_or(4) as u32;
     }
 
     // Execute CB-prefixed opcodes for bit manipulation and shifts/rotates
-    fn execute_cb(&mut self) -> u8 {
+    fn execute_cb(&mut self) -> u32 {
         let opcode = self.mmu.fetch_byte(&mut self.registers.pc);
         let entry = opcodes::cb_opcodes_map.get(&opcode);
         let cycles = entry.map(|op| op.cycles).unwrap_or(2); // Default to 8 cycles for CB ops
@@ -268,7 +288,7 @@ impl CPU {
 
             Reg16::AF => {
                 self.registers.a = (value >> 8) as u8;
-                self.registers.f = 0.into();
+                self.registers.f = FlagsRegister::unpack(value as u8 & 0xF0);
             }
 
             Reg16::SP => self.registers.sp = value,
@@ -477,14 +497,14 @@ impl CPU {
 
     // DEC on an 8-bit register or memory location, and updates flags accordingly
     fn dec_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg((opcode >> 3) & 0x07);
         let value = self.read_r8(reg);
         let result = value.wrapping_sub(1);
         self.write_r8(reg, result);
 
         self.registers.f.zero = result == 0;
         self.registers.f.subtract = true;
-        self.registers.f.half_carry = (value & 0xF) == 0xF;
+        self.registers.f.half_carry = (value & 0x0F) == 0;
     }
 
     // INC on 16-bit register or memory location, does not update flags
@@ -495,14 +515,22 @@ impl CPU {
 
     // INC on an 8-bit register or memory location, and updates flags accordingly
     fn inc_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg((opcode >> 3) & 0x07);
         let value = self.read_r8(reg);
         let result = value.wrapping_add(1);
+
+        println!(
+            "INC {:?}: {:02X} -> {:02X}",
+            reg,
+            value,
+            result
+        );
+
         self.write_r8(reg, result);
 
         self.registers.f.zero = result == 0;
         self.registers.f.subtract = false;
-        self.registers.f.half_carry = (value & 0xF) + 1 > 0xF;
+        self.registers.f.half_carry = (value & 0x0F) + 1 > 0x0F;
     }
 
     // Main OR operation on Accumulator
@@ -810,7 +838,8 @@ impl CPU {
     fn jr_cond_s8(&mut self, condition: Condition) {
         let steps = self.mmu.fetch_byte(&mut self.registers.pc) as i8;
         if self.check_condition(condition) {
-            self.registers.pc = ((self.registers.pc as i32) + (steps as i32)) as u16;
+            let pc = self.registers.pc as i32;
+            self.registers.pc = (pc + steps as i32) as u16;
         }
     }
 
@@ -879,7 +908,7 @@ impl CPU {
     // Test bit b in an 8-bit register or memory location if HL is specified, and set flags accordingly
     fn bit_b_r8(&mut self, opcode: u8) {
         let bit = (opcode >> 3) & 0b111;
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
 
         self.registers.f.zero = (value & (1 << bit)) == 0;
@@ -932,7 +961,7 @@ impl CPU {
     // Reset bit b in an 8-bit register or memory location if HL is specified
     fn res_b_r8(&mut self, opcode: u8) {
         let bit = (opcode >> 3) & 0b111;
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
 
         self.write_r8(reg, value & !(1 << bit));
@@ -940,7 +969,7 @@ impl CPU {
 
     // Rotate left the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, using the old bit 7 as the new bit 0 and the old bit 0 as the new Carry Flag
     fn rl_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let b7 = (value & 0x80) != 0;
         let carry = self.registers.f.carry as u8;
@@ -968,7 +997,7 @@ impl CPU {
 
     // Rotate left the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location
     fn rlc_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let carry = (value & 0x80) != 0;
         let result = (value << 1) | carry as u8;
@@ -994,7 +1023,7 @@ impl CPU {
 
     // Rotate right the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, using the old bit 0 as the new bit 7 and the old bit 0 as the new Carry Flag
     fn rr_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let b0 = (value & 0x01) != 0;
         let carry = self.registers.f.carry as u8;
@@ -1005,7 +1034,6 @@ impl CPU {
         self.registers.f.subtract = false;
         self.registers.f.half_carry = false;
         self.registers.f.carry = b0;
-
     }
 
     // Rotate right the value of the Accumulator, and store the result back in A
@@ -1023,7 +1051,7 @@ impl CPU {
 
     // Rotate right the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location
     fn rrc_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let carry = (value & 0x01) != 0;
         let result = (value >> 1) | ((carry as u8) << 7);
@@ -1057,7 +1085,7 @@ impl CPU {
     // Set bit b in an 8-bit register or memory location if HL is specified
     fn set_b_r8(&mut self, opcode: u8) {
         let bit = (opcode >> 3) & 0b111;
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
 
         self.write_r8(reg, value | (1 << bit));
@@ -1065,7 +1093,7 @@ impl CPU {
 
     // Shift left the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, setting bit 0 to 0 and bit 7 to the old bit 7
     fn sla_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let carry = (value & 0x80) != 0;
         let result = value << 1;
@@ -1079,7 +1107,7 @@ impl CPU {
 
     // Shift contents of an 8-bit register or memory location if HL is specified right, and store the result back in the same location, keeping bit 7 unchanged and setting bit 0 to the old bit 0
     fn sra_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let carry = (value & 0x01) != 0;
         let msb = value & 0x80;
@@ -1094,7 +1122,7 @@ impl CPU {
 
     // Shift right the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, setting bit 7 to 0 and bit 0 to the old bit 0
     fn srl_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let carry = (value & 0x01) != 0;
         let result = value >> 1;
@@ -1108,7 +1136,7 @@ impl CPU {
 
     // Swap the upper and lower nibbles of an 8-bit register or memory location if HL is specified, and store the result back in the same location, and update flags accordingly
     fn swap_r8(&mut self, opcode: u8) {
-        let reg = self.decode_reg(opcode);
+        let reg = self.decode_reg(opcode & 0x07);
         let value = self.read_r8(reg);
         let result = (value << 4) | (value >> 4);
         self.write_r8(reg, result);

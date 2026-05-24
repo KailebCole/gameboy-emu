@@ -1,9 +1,9 @@
-use crate::{cart::Cart, ppu};
+use crate::{cart::Cart, ppu::PPU};
 
 pub struct MMU {
     cart: Cart,
+    ppu: PPU,
     boot: [u8; 0x100],  // 256 bytes for the boot ROM
-    rom: [u8; 0x8000],  // 32KB for the cartridge ROM
     cram: [u8; 0x2000], // 8KB for external RAM
     wram: [u8; 0x2000], // 8KB for working RAM
     vram: [u8; 0x2000], // 8KB for video RAM
@@ -13,11 +13,11 @@ pub struct MMU {
 }
 
 impl MMU {
-    pub fn new() -> Self {
-        MMU {
-            cart: Cart::new(vec![0x00, 0x00, 0x00]), // Placeholder, should be initialized with actual ROM data
+    pub fn new(cart: Cart) -> Self {
+        Self {
+            cart,
+            ppu: PPU::new(),
             boot: [0; 0x100],
-            rom: [0; 0x8000],
             cram: [0; 0x2000],
             wram: [0; 0x2000],
             vram: [0; 0x2000],
@@ -29,18 +29,15 @@ impl MMU {
 
     pub fn read_byte(&self, addr: u16) -> u8 {
         match addr {
-            0x0000..=0x00FF => {
-                if self.boot_enabled {
-                    self.boot[addr as usize]
-                } else {
-                    self.cart.read(addr)
-                }
-            },       
+            0x0000..=0x00FF if self.boot_enabled => self.boot[addr as usize],     
             0x0000..=0x7FFF => self.cart.read(addr),
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
             0xA000..=0xBFFF => self.cram[(addr - 0xA000) as usize],
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize],
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
+            0xFF40 => self.ppu.lcdc, // Read LCD Control Register from PPU
+            0xFF41 => self.ppu.stat, // Read LCD Status Register
+            0xFF44 => self.ppu.ly, // Read current scanline from PPU
             0xFF80..=0xFFFF => self.hram[(addr - 0xFF80) as usize],
             _ => 0xFF, // Unmapped addresses return 0xFF
         }
@@ -49,11 +46,14 @@ impl MMU {
     pub fn write_byte(&mut self, addr: u16, value: u8) {
         match addr {
             0x0000..=0x00FF => self.boot[addr as usize] = value,
-            0x0000..=0x7FFF => panic!("Attempt to write to ROM address: 0x{:04X}", addr),
+            0x0000..=0x7FFF => self.cart.write(addr, value),
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize] = value,
             0xA000..=0xBFFF => self.cram[(addr - 0xA000) as usize] = value,
             0xC000..=0xDFFF => self.wram[(addr - 0xC000) as usize] = value,
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
+            0xFF40 => self.ppu.lcdc = value, // Write to LCD Control Register in PPU
+            0xFF41 => self.ppu.stat = value, // Write to LCD Status Register
+            0xFF44 => self.ppu.ly = value, // Write to current scanline in PPU
             0xFF80..=0xFFFF => self.hram[(addr - 0xFF80) as usize] = value,
             _ => {}, // Ignore writes to unmapped addresses
         }
@@ -69,5 +69,19 @@ impl MMU {
         let low = self.fetch_byte(pc) as u16;
         let high = self.fetch_byte(pc) as u16;
         (high << 8) | low
+    }
+
+    pub fn step_ppu(&mut self, cycles: u32) {
+        let vram = &self.vram;
+        let oam = &self.oam;
+        self.ppu.step(cycles, vram, oam);
+    }
+
+    pub fn get_framebuffer(&self) -> &[u32] {
+        &self.ppu.framebuffer
+    }
+
+    pub fn get_ppu_debug_state(&self) -> (u8, u8, u8) {
+        (self.ppu.lcdc, self.ppu.stat, self.ppu.ly)
     }
 }

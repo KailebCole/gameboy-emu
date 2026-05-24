@@ -5,11 +5,11 @@ pub struct OPCode {
     pub code: u8,
     pub name: &'static str,
     pub len: u8,
-    pub cycles: u8,
+    pub cycles: u32,
 }
 
 impl OPCode {
-    pub fn new(code: u8, name: &'static str, len: u8, cycles: u8) -> Self {
+    pub fn new(code: u8, name: &'static str, len: u8, cycles: u32) -> Self {
         OPCode { code, name, len, cycles }
     }
 

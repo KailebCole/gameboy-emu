@@ -44,6 +44,25 @@ impl Registers {
             pc: 0x0000, // Program Counter starts at the beginning of ROM
         }
     }
+    
+}
+
+impl FlagsRegister{
+    pub fn pack(&self) -> u8 {
+        (self.zero as u8) << 7 |
+        (self.subtract as u8) << 6 |
+        (self.half_carry as u8) << 5 |
+        (self.carry as u8) << 4
+    }
+
+    pub fn unpack(value: u8) -> Self {
+        Self {
+            zero: value & 0x80 != 0,
+            subtract: value & 0x40 != 0,
+            half_carry: value & 0x20 != 0,
+            carry: value & 0x10 != 0,
+        }
+    }
 }
 
 impl std::convert::From<FlagsRegister> for u8 {
