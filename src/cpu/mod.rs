@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+
 use crate::mmu;
 mod registers;
 mod opcodes;
@@ -15,6 +16,12 @@ pub enum Reg16 {
     BC, DE, HL, AF, SP, PC
 }
 
+// List of Conditional Tests
+#[derive(Copy, Clone)]
+pub enum Condition {
+    NZ, Z, NC, C
+}
+
 // Main CPU structure
 pub struct CPU {
     registers: registers::Registers,
@@ -28,7 +35,7 @@ pub struct CPU {
 }
 
 impl CPU {
-    pub fn new() -> Self {
+    pub fn new(mmu: mmu::MMU) -> Self {
         CPU {
             registers: registers::Registers::new(),
             halted: false,
@@ -37,7 +44,7 @@ impl CPU {
             di: 0,
             ticks: 0,
             m_cycle: 0,
-            mmu: mmu::MMU::new(),
+            mmu: mmu,
         }
     }
 
@@ -95,6 +102,7 @@ impl CPU {
             0xC6 => self.add_i8(),
             0xCE => self.adc_i8(),
             0xD6 => self.sub_i8(),
+            0xDE => self.sbc_i8(),
             0xE6 => self.and_i8(),
             0xE8 => self.add_sp_s8(),
             0xEE => self.xor_i8(),
@@ -113,17 +121,29 @@ impl CPU {
 
             // Jumps and Calls
             0x18 => self.jr_s8(),
-            0x20|0x28|0x30|0x38 => self.jr_c_s8(opcode),
-            0xC0|0xC8|0xD0|0xD8 => self.ret_c(opcode),
-            0xC2|0xCA|0xD2|0xDA => self.jp_c_a16(opcode),
+            0x20 => self.jr_cond_s8(Condition::NZ),
+            0x28 => self.jr_cond_s8(Condition::Z),
+            0x30 => self.jr_cond_s8(Condition::NC),
+            0x38 => self.jr_cond_s8(Condition::C),
+            0xC0 => self.ret_cond(Condition::NZ),
+            0xC2 => self.jp_cond_a16(Condition::NZ),
             0xC3 => self.jp_a16(),
-            0xC4|0xCC|0xD4|0xDC => self.call_cond_a16(opcode),
+            0xC4 => self.call_cond_a16(Condition::NZ),
             0xC7 => self.rst_tgt3(0x00),
+            0xC8 => self.ret_cond(Condition::Z),
             0xC9 => self.ret(),
+            0xCA => self.jp_cond_a16(Condition::Z),
+            0xCC => self.call_cond_a16(Condition::Z),
             0xCD => self.call_a16(),
             0xCF => self.rst_tgt3(0x08),
+            0xD0 => self.ret_cond(Condition::NC),
+            0xD2 => self.jp_cond_a16(Condition::NC),
+            0xD4 => self.call_cond_a16(Condition::NC),
             0xD7 => self.rst_tgt3(0x10),
+            0xD8 => self.ret_cond(Condition::C),
             0xD9 => self.reti(),
+            0xDA => self.jp_cond_a16(Condition::C),
+            0xDC => self.call_cond_a16(Condition::C),
             0xDF => self.rst_tgt3(0x18),
             0xE7 => self.rst_tgt3(0x20),
             0xE9 => self.jp_hl(),
@@ -153,6 +173,25 @@ impl CPU {
         }
         else if self.ei > 1 {
             self.ei -= 1;
+        }
+    }
+
+    // Execute CB-prefixed opcodes for bit manipulation and shifts/rotates
+    fn execute_cb(&mut self) {
+        let opcode = self.mmu.fetch_byte(&mut self.registers.pc);
+
+        match opcode {
+            0x00..=0x07 => self.rlc_r8(opcode),
+            0x08..=0x0F => self.rrc_r8(opcode),
+            0x10..=0x17 => self.rl_r8(opcode),
+            0x18..=0x1F => self.rr_r8(opcode),
+            0x20..=0x27 => self.sla_r8(opcode),
+            0x28..=0x2F => self.sra_r8(opcode),
+            0x30..=0x37 => self.swap_r8(opcode),
+            0x38..=0x3F => self.srl_r8(opcode),
+            0x40..=0x7F => self.bit_b_r8(opcode),
+            0x80..=0xBF => self.res_b_r8(opcode),
+            0xC0..=0xFF => self.set_b_r8(opcode),
         }
     }
 
@@ -296,6 +335,15 @@ impl CPU {
         self.mmu.write_byte(self.registers.sp, lo);
     }
 
+    // Check the given condition of a function
+    fn check_condition(&self, condition: Condition) -> bool {
+        match condition {
+            Condition::NZ => !self.registers.f.zero,
+            Condition::Z => self.registers.f.zero,
+            Condition::NC => !self.registers.f.carry,
+            Condition::C => self.registers.f.carry,
+        }
+    }
 
 /* #region ALU Operations */
     // Main ADC operation on Accumulator
@@ -711,17 +759,10 @@ impl CPU {
 
 /* #region Stack and Control Operations */
     // Call the subroutine at the address specified by a 16-bit immediate if the condition is met
-    fn call_cond_a16(&mut self, opcode: u8) {
+    fn call_cond_a16(&mut self, condition: Condition) {
         let addr = self.mmu.fetch_word(&mut self.registers.pc);
-        let condition = match (opcode >> 4) & 0b111 {
-            0 => !self.registers.f.zero, // NZ
-            1 => self.registers.f.zero,  // Z
-            2 => !self.registers.f.carry, // NC
-            3 => self.registers.f.carry,  // C
-            _ => unreachable!(),
-        };
 
-        if condition {
+        if self.check_condition(condition) {
             self.push_u16(self.registers.pc);
             self.registers.pc = addr;
         }
@@ -750,17 +791,9 @@ impl CPU {
     }
 
     // Jump to the address specified by a 16-bit immediate if the carry flag is 1
-    fn jp_c_a16(&mut self, opcode: u8) {
+    fn jp_cond_a16(&mut self, condition: Condition) {
         let addr = self.mmu.fetch_word(&mut self.registers.pc);
-        let condition = match (opcode >> 4) & 0b111 {
-            0 => !self.registers.f.zero, // NZ
-            1 => self.registers.f.zero,  // Z
-            2 => !self.registers.f.carry, // NC
-            3 => self.registers.f.carry,  // C
-            _ => unreachable!(),
-        };
-
-        if condition {
+        if self.check_condition(condition) {
             self.registers.pc = addr;
         }
     }
@@ -777,17 +810,9 @@ impl CPU {
     }
 
     // Jump s8 steps from current PC if carry flag is 1
-    fn jr_c_s8(&mut self, opcode: u8) {
+    fn jr_cond_s8(&mut self, condition: Condition) {
         let steps = self.mmu.fetch_byte(&mut self.registers.pc) as i8;
-        let condition = match (opcode >> 4) & 0b111 {
-            0 => !self.registers.f.zero, // NZ
-            1 => self.registers.f.zero,  // Z
-            2 => !self.registers.f.carry, // NC
-            3 => self.registers.f.carry,  // C
-            _ => unreachable!(),
-        };
-
-        if condition {
+        if self.check_condition(condition) {
             self.registers.pc = ((self.registers.pc as i32) + (steps as i32)) as u16;
         }
     }
@@ -824,16 +849,8 @@ impl CPU {
     }
 
     // Return from a subroutine if the carry flag is 1
-    fn ret_c(&mut self, opcode: u8) {
-        let condition = match (opcode >> 4) & 0b111 {
-            0 => !self.registers.f.zero, // NZ
-            1 => self.registers.f.zero,  // Z
-            2 => !self.registers.f.carry, // NC
-            3 => self.registers.f.carry,  // C
-            _ => unreachable!(),
-        };
-
-        if condition {
+    fn ret_cond(&mut self, condition: Condition) {
+        if self.check_condition(condition) {
             self.registers.pc = self.pop_u16();
         }
     }
@@ -860,39 +877,247 @@ impl CPU {
 
 
 /* #region Bit Operations */
+    // Test bit b in an 8-bit register or memory location if HL is specified, and set flags accordingly
+    fn bit_b_r8(&mut self, opcode: u8) {
+        let bit = (opcode >> 3) & 0b111;
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+
+        self.registers.f.zero = (value & (1 << bit)) == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = true;
+    }
+    
+    // Flip the Carry Flag
     fn ccf(&mut self) {
-        
+        self.registers.f.carry = !self.registers.f.carry;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
     }
 
+    // Take the one's complement of register A
     fn cpl(&mut self) {
-        
+        self.registers.a = !self.registers.a;
+        self.registers.f.subtract = true;
+        self.registers.f.half_carry = true;
     }
 
+    // Adjusts Accumulator to BCD format after addition or subtraction operations, and updates flags accordingly
     fn daa(&mut self) {
-        
+        let mut a = self.registers.a;
+        let mut carry = self.registers.f.carry;
+
+        if !self.registers.f.subtract {
+            if self.registers.f.half_carry || (a & 0x0F) > 9 {
+                a = a.wrapping_add(0x06);
+            }
+            if self.registers.f.carry || a > 0x99 {
+                a = a.wrapping_add(0x60);
+                carry = true;
+            }
+        } else {
+            if self.registers.f.half_carry {
+                a = a.wrapping_sub(0x06);
+            }
+            if self.registers.f.carry {
+                a = a.wrapping_sub(0x60);
+            }
+        }
+        self.registers.a = a;
+
+        self.registers.f.zero = a == 0;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
     }
 
+    // Reset bit b in an 8-bit register or memory location if HL is specified
+    fn res_b_r8(&mut self, opcode: u8) {
+        let bit = (opcode >> 3) & 0b111;
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+
+        self.write_r8(reg, value & !(1 << bit));
+    }
+
+    // Rotate left the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, using the old bit 7 as the new bit 0 and the old bit 0 as the new Carry Flag
+    fn rl_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let b7 = (value & 0x80) != 0;
+        let carry = self.registers.f.carry as u8;
+        let result = (value << 1) | carry;
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = b7;
+    }
+
+    // Rotate left the value of the Accumulator, and store the result back in A
     fn rla(&mut self) {
-        
+        let a = self.registers.a;
+        let carry = (a & 0x80) != 0;
+        let result = (a << 1) | carry as u8;
+
+        self.registers.a = result;
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
     }
 
+    // Rotate left the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location
+    fn rlc_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let carry = (value & 0x80) != 0;
+        let result = (value << 1) | carry as u8;
+        self.write_r8(reg, result);
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
+    }
+
+    // Rotate the value of the Accumulator left, and store the result back in A, using the old bit 7 as the new bit 0
     fn rlca(&mut self) {
-        
+        let a = self.registers.a;
+        let carry = (a & 0x80) != 0;
+        self.registers.a = (a << 1) | carry as u8;
+
+        self.registers.f.zero = false;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
     }
 
+    // Rotate right the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, using the old bit 0 as the new bit 7 and the old bit 0 as the new Carry Flag
+    fn rr_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let b0 = (value & 0x01) != 0;
+        let carry = self.registers.f.carry as u8;
+        let result = (value >> 1) | ((carry as u8) << 7);
+        self.write_r8(reg, result);
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = b0;
+
+    }
+
+    // Rotate right the value of the Accumulator, and store the result back in A
     fn rra(&mut self) {
-        
+        let a = self.registers.a;
+        let carry = (a & 0x01) != 0;
+        let result = (a >> 1) | ((carry as u8) << 7);
+        self.registers.a = result;
+
+        self.registers.f.zero = false;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
     }
 
+    // Rotate right the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location
+    fn rrc_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let carry = (value & 0x01) != 0;
+        let result = (value >> 1) | ((carry as u8) << 7);
+        self.write_r8(reg, result);
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
+    }
+
+    // Rotate right the value of the Accumulator, and store the result back in A, using the old bit 0 as the new bit 7
     fn rrca(&mut self) {
-        
+        let a = self.registers.a;
+        let carry = (a & 0x01) != 0;
+        self.registers.a = (a >> 1) | ((carry as u8) << 7);
+
+        self.registers.f.zero = false;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
     }
 
+    // Set the Carry Flag
     fn scf(&mut self) {
-        
+        self.registers.f.carry = true;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+    }
+
+    // Set bit b in an 8-bit register or memory location if HL is specified
+    fn set_b_r8(&mut self, opcode: u8) {
+        let bit = (opcode >> 3) & 0b111;
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+
+        self.write_r8(reg, value | (1 << bit));
+    }
+
+    // Shift left the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, setting bit 0 to 0 and bit 7 to the old bit 7
+    fn sla_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let carry = (value & 0x80) != 0;
+        let result = value << 1;
+        self.write_r8(reg, result);
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
+    }
+
+    // Shift contents of an 8-bit register or memory location if HL is specified right, and store the result back in the same location, keeping bit 7 unchanged and setting bit 0 to the old bit 0
+    fn sra_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let carry = (value & 0x01) != 0;
+        let msb = value & 0x80;
+        let result = (value >> 1) | msb;
+        self.write_r8(reg, result);
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
+    }
+
+    // Shift right the value of an 8-bit register or memory location if HL is specified, and store the result back in the same location, setting bit 7 to 0 and bit 0 to the old bit 0
+    fn srl_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let carry = (value & 0x01) != 0;
+        let result = value >> 1;
+        self.write_r8(reg, result);
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = carry;
+    }
+
+    // Swap the upper and lower nibbles of an 8-bit register or memory location if HL is specified, and store the result back in the same location, and update flags accordingly
+    fn swap_r8(&mut self, opcode: u8) {
+        let reg = self.decode_reg(opcode);
+        let value = self.read_r8(reg);
+        let result = (value << 4) | (value >> 4);
+        self.write_r8(reg, result);
+
+        self.registers.f.zero = result == 0;
+        self.registers.f.subtract = false;
+        self.registers.f.half_carry = false;
+        self.registers.f.carry = false;
     }
 /* #endregion */
-
-    fn execute_cb(&mut self) {}
 
 }
