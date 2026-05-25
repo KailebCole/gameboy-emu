@@ -5,8 +5,6 @@ use crate::{cpu::{opcodes::{CB_M_CYCLES, CPU_M_CYCLES}, registers::FlagsRegister
 mod registers;
 mod opcodes;
 
-const ENABLE_LOGGING: bool = false; 
-
 // List of 8-bit registers for easier access
 #[derive(Copy, Clone, Debug)]
 pub enum Reg8{
@@ -35,10 +33,11 @@ pub struct CPU {
     ticks: u32,
     m_cycle:u32,
     pub mmu: MMU,
+    logging: bool,
 }
 
 impl CPU {
-    pub fn new(mmu: MMU) -> Self {
+    pub fn new(mmu: MMU, logging: bool) -> Self {
         Self {
             registers: registers::Registers::new(),
             halted: false,
@@ -48,12 +47,13 @@ impl CPU {
             ticks: 0,
             m_cycle: 0,
             mmu,
+            logging,
         }
     }
 
     // Main execution loop for the CPU, called every frame
     pub fn step(&mut self) -> u32 {
-        if ENABLE_LOGGING {
+        if self.logging {
             self.log_state();
         }
 
@@ -941,36 +941,26 @@ impl CPU {
     // Adjusts Accumulator to BCD format after addition or subtraction operations, and updates flags accordingly
     fn daa(&mut self) {
         let mut a = self.registers.a;
-        let mut adjust = 0;
-        let carry = self.registers.f.carry;
-        let half_carry = self.registers.f.half_carry;
-
-        if self.registers.f.subtract {
-            if half_carry {
+        let mut adjust = if self.registers.f.carry { 0x60 } else { 0x00 };
+        if self.registers.f.half_carry {
+            adjust |= 0x06;
+        };
+        if !self.registers.f.subtract {
+            if a & 0x0F > 0x09 {
                 adjust |= 0x06;
-            }
-            if carry {
+            };
+            if a > 0x99 {
                 adjust |= 0x60;
-            }
-            a = a.wrapping_sub(adjust);
-        } else {
-            if half_carry || (a & 0x0F) > 0x09 {
-                adjust |= 0x06;
-            }
-            if carry || a > 0x99 {
-                adjust |= 0x60;
-            }
+            };
             a = a.wrapping_add(adjust);
+        } else {
+            a = a.wrapping_sub(adjust);
         }
 
-        self.registers.a = a;
-
-        // Set flags
-        self.registers.f.zero = a == 0;
+        self.registers.f.carry = adjust >= 0x60;
         self.registers.f.half_carry = false;
-        if adjust >= 0x60 {
-            self.registers.f.carry = true;
-        }
+        self.registers.f.zero = a == 0;
+        self.registers.a = a;
     }
 
     // Reset bit b in an 8-bit register or memory location if HL is specified

@@ -12,7 +12,8 @@ mod mmu;
 mod ppu;
 mod logger;
 
-const ROM_PATH: &str = "roms/01.gb";
+const ROM_PATH: &str = "roms/03.gb";
+const ENABLE_LOGGING: bool = true; 
 
 // =========================
 // DISPLAY CONFIG
@@ -34,7 +35,7 @@ fn main() {
     // =========================
     let cart = cart::Cart::new(ROM_PATH);
     let mmu = mmu::MMU::new(cart);
-    let cpu = cpu::CPU::new(mmu);
+    let cpu = cpu::CPU::new(mmu, ENABLE_LOGGING);
 
     let framebuffer = Arc::new(Mutex::new(vec![0u32; WIDTH * HEIGHT]));
     let running = Arc::new(AtomicBool::new(true));

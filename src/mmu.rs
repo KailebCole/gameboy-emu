@@ -71,6 +71,17 @@ impl MMU {
     }
 
     pub fn read_byte(&self, addr: u16) -> u8 {
+        match addr {
+            0xFF80..=0xFFFE => {
+                return self.hram[(addr - 0xFF80) as usize];
+            }
+
+            0xFF40 => return self.ppu.lcdc,
+            0xFF41 => return self.ppu.stat,
+            0xFF44 => return 0x90,
+            _ => {}
+        }
+        
         let page = self.page[(addr >> 8) as usize];
 
         match page {
@@ -99,6 +110,15 @@ impl MMU {
     }
 
     pub fn write_byte(&mut self, addr: u16, value: u8) {
+        match addr {
+            0xFF80..=0xFFFE => {
+                self.hram[(addr - 0xFF80) as usize] = value;
+            }
+            0xFF40 => self.ppu.lcdc = value,
+            0xFF41 => self.ppu.stat = value,
+            0xFF44 => self.ppu.ly = value,
+            _ => {}
+        }
         let page = self.page[(addr >> 8) as usize];
 
         match page {
