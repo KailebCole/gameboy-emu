@@ -13,6 +13,8 @@ const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
 const scale: usize = 4;
 
+const cycles_per_frame: u64 = 4194304 / 60;
+
 fn main() {
     /* CLEAR LOG FILES */
     std::fs::write("C:\\Users\\Kaileb\\Documents\\Programs\\gameboy-emu\\log.txt", "").expect("Failed to clear CPU log");
@@ -31,7 +33,7 @@ fn main() {
         panic!("Unable to create window: {}", e);
     });
 
-    window.set_target_fps(0);
+    window.set_target_fps(120);
 
     /* SYSTEM SETUP */ 
     let cart =  cart::Cart::new("C:\\Users\\Kaileb\\Documents\\Programs\\gameboy-emu\\roms\\03.gb");
@@ -58,16 +60,18 @@ fn main() {
         }
 
         if !paused || step_once {
-            // Step CPU
-            let cycles: u32 = cpu.step();
-            cycles_total += cycles;
-            cycles_executed += cycles as u64;
-            //if(cycles_total % 10000 == 0) { println!("Total Cycles: {}", cycles_total);}
-            // Step PPU with same cycles
-            cpu.mmu.step_ppu(cycles);
+            let mut cycles_this_frame: u32 = 0;
+            while cycles_this_frame < cycles_per_frame as u32 {
+                let cycles = cpu.step();
+                cycles_this_frame += cycles;
+                cycles_total += cycles as u64;
+                // Step PPU with same cycles
+                cpu.mmu.step_ppu(cycles);
+            }
 
             // Copy framebuffer to window buffer
             buffer.copy_from_slice(&cpu.mmu.get_framebuffer());
+            window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
             step_once = false;
             if(cpu.mmu.read_byte(0xC100) == 0x42) {
                 println!("Test passed!");
@@ -77,12 +81,10 @@ fn main() {
 
         if last_report.elapsed() >= Duration::from_secs(1) {
             let elapsed = start.elapsed().as_secs_f64();
-            let mhz = (cycles_executed as f64) / (elapsed * 1_000_000.0);
-            println!("Cycles/sec:{} | MHz: {:.2}",cycles_executed, mhz);
+            let mhz = (cycles_total as f64) / (elapsed * 1_000_000.0);
+            let cps = cycles_total;
+            println!("Cycles/sec:{} | MHz: {:.2}",cps, mhz);
             last_report = Instant::now();
         }
-
-        // Render
-        window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
     }
 }
