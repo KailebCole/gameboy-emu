@@ -1,90 +1,134 @@
-use std::panic;
-use pixels::{Pixels, SurfaceTexture};
+use std::{
+    sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}},
+    thread,
+    time::{Duration, Instant},
+};
+
 use minifb::{Key, Window, WindowOptions};
-use std::time::{Duration, Instant};
 
 mod cart;
 mod cpu;
-mod ppu;
 mod mmu;
-mod timer;
+mod ppu;
 
 const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
-const scale: usize = 4;
 
-const cycles_per_frame: u64 = 4194304 / 60;
+const CPU_CLOCK_HZ: f64 = 4_194_304.0 / 4.0;
+const FPS: f64 = 60.0;
+const CYCLES_PER_FRAME: u32 = (CPU_CLOCK_HZ / FPS) as u32;
 
 fn main() {
-    /* CLEAR LOG FILES */
-    std::fs::write("C:\\Users\\Kaileb\\Documents\\Programs\\gameboy-emu\\log.txt", "").expect("Failed to clear CPU log");
+    // =========================
+    // SETUP
+    // =========================
+    let cart = cart::Cart::new("roms/03.gb");
+    let mmu = mmu::MMU::new(cart);
+    let cpu = cpu::CPU::new(mmu);
 
-    /* WINDOW SETUP */
+    let framebuffer = Arc::new(Mutex::new(vec![0u32; WIDTH * HEIGHT]));
+    let running = Arc::new(AtomicBool::new(true));
+
+    let fb_emulator = framebuffer.clone();
+    let fb_renderer = framebuffer.clone();
+    let emu_running = running.clone();
+    let render_running = running.clone();
+
+    // =========================
+    // TIMING TRACKING
+    // =========================
     let start = Instant::now();
-    let mut last_report = start;
-    let mut cycles_executed: u64 = 0;
+    let mut last_report = Instant::now();
+    let cycles_executed = Arc::new(AtomicU64::new(0));
+    let cycles_emu = cycles_executed.clone();
+    let cycles_timing = cycles_executed.clone();
 
-    let mut window = Window::new(
-        "RUSTY - A Gameboy Emulator",
-        WIDTH * scale,
-        HEIGHT * scale,
-        WindowOptions::default(),
-    ).unwrap_or_else(|e| {
-        panic!("Unable to create window: {}", e);
+    // =========================
+    // EMULATOR THREAD (CPU + PPU)
+    // =========================
+    let emulator_thread = thread::spawn(move || {
+        let mut cpu = cpu;
+        let mut cycle_accumulator: u32 = 0;
+
+        while emu_running.load(Ordering::Relaxed) {
+            let cycles = cpu.step();
+            cycle_accumulator += cycles;
+            cycles_emu.fetch_add(cycles as u64, Ordering::Relaxed);
+
+            cpu.mmu.step_ppu(cycles);
+
+            if cycle_accumulator >= CYCLES_PER_FRAME {
+                cycle_accumulator -= CYCLES_PER_FRAME;
+
+                let fb = cpu.mmu.get_framebuffer();
+
+                if let Ok(mut shared) = fb_emulator.lock() {
+                    shared.copy_from_slice(fb);
+                }
+            }
+        }
     });
 
-    window.set_target_fps(120);
+    // =========================
+    // RENDER THREAD
+    // =========================
+    let render_thread = thread::spawn(move || {
+        let mut window = Window::new(
+            "Rusty Emulator",
+            WIDTH * 4,
+            HEIGHT * 4,
+            WindowOptions::default(),
+        )
+        .unwrap();
 
-    /* SYSTEM SETUP */ 
-    let cart =  cart::Cart::new("C:\\Users\\Kaileb\\Documents\\Programs\\gameboy-emu\\roms\\03.gb");
-    let mut mmu = mmu::MMU::new(cart);
-    let mut cpu = cpu::CPU::new(mmu);
+        window.set_target_fps(60);
 
-    let mut buffer: Vec<u32> = vec![0; (WIDTH * HEIGHT) as usize];
-    let mut cycles_total = 0;
+        let mut local_buffer = vec![0u32; WIDTH * HEIGHT];
 
-    /* MAIN LOOP */
-
-    let mut paused = false;
-    let mut step_once = false;
-
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        window.update();
-        // Toggle pause with Space
-        if window.is_key_pressed(Key::Space, minifb::KeyRepeat::No) {
-            paused = !paused;
-        }
-        // Step once with S
-        if window.is_key_pressed(Key::S, minifb::KeyRepeat::No) {
-            step_once = true;
-        }
-
-        if !paused || step_once {
-            let mut cycles_this_frame: u32 = 0;
-            while cycles_this_frame < cycles_per_frame as u32 {
-                let cycles = cpu.step();
-                cycles_this_frame += cycles;
-                cycles_total += cycles as u64;
-                // Step PPU with same cycles
-                cpu.mmu.step_ppu(cycles);
-            }
-
-            // Copy framebuffer to window buffer
-            buffer.copy_from_slice(&cpu.mmu.get_framebuffer());
-            window.update_with_buffer(&buffer, WIDTH, HEIGHT).unwrap();
-            step_once = false;
-            if(cpu.mmu.read_byte(0xC100) == 0x42) {
-                println!("Test passed!");
+        while window.is_open() {
+            if window.is_key_down(Key::Escape) {
+                render_running.store(false, Ordering::Relaxed);
                 break;
             }
-        }
 
-        if last_report.elapsed() >= Duration::from_secs(1) {
-            let elapsed = start.elapsed().as_secs_f64();
-            let mhz = (cycles_total as f64) / (elapsed * 1_000_000.0);
-            let cps = cycles_total;
-            println!("Cycles/sec:{} | MHz: {:.2}",cps, mhz);
-            last_report = Instant::now();
+            if let Ok(shared) = fb_renderer.lock() {
+                local_buffer.copy_from_slice(&shared);
+            }
+
+            window
+                .update_with_buffer(&local_buffer, WIDTH, HEIGHT)
+                .unwrap();
+
+            thread::sleep(Duration::from_millis(1));
         }
-    }
+    });
+
+    // =========================
+    // TIMING REPORT THREAD 
+    // =========================
+    let timing_running = running.clone();
+
+    let timing_thread = thread::spawn(move || {
+        while timing_running.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(1));
+
+            let elapsed = start.elapsed().as_secs_f64();
+            let cycles = cycles_timing.load(Ordering::Relaxed);
+            let mhz = (cycles as f64) / (elapsed * 1_000_000.0);
+
+            println!(
+                "Cycles: {} | MHz: {:.2} | Runtime: {:.2}s",
+                cycles,
+                mhz,
+                elapsed
+            );
+        }
+    });
+
+    // =========================
+    // JOIN THREADS
+    // =========================
+    emulator_thread.join().unwrap();
+    render_thread.join().unwrap();
+    timing_thread.join().unwrap();
 }
