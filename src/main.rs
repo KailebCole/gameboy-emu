@@ -11,9 +11,18 @@ mod cpu;
 mod mmu;
 mod ppu;
 
+const ROM_PATH: &str = "roms/01.gb";
+
+// =========================
+// DISPLAY CONFIG
+// =========================
 const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
+const SCALE: usize = 4;
 
+// =========================
+// TIMING CONFIG
+// =========================
 const CPU_CLOCK_HZ: f64 = 4_194_304.0 / 4.0;
 const FPS: f64 = 60.0;
 const CYCLES_PER_FRAME: u32 = (CPU_CLOCK_HZ / FPS) as u32;
@@ -22,7 +31,7 @@ fn main() {
     // =========================
     // SETUP 
     // =========================
-    let cart = cart::Cart::new("roms/03.gb");
+    let cart = cart::Cart::new(ROM_PATH);
     let mmu = mmu::MMU::new(cart);
     let cpu = cpu::CPU::new(mmu);
 
@@ -33,12 +42,12 @@ fn main() {
     let fb_renderer = framebuffer.clone();
     let emu_running = running.clone();
     let render_running = running.clone();
+    let timing_running = running.clone();
 
     // =========================
     // TIMING TRACKING
     // =========================
     let start = Instant::now();
-    let mut last_report = Instant::now();
     let cycles_executed = Arc::new(AtomicU64::new(0));
     let cycles_emu = cycles_executed.clone();
     let cycles_timing = cycles_executed.clone();
@@ -50,21 +59,31 @@ fn main() {
         let mut cpu = cpu;
         let mut cycle_accumulator: u32 = 0;
 
+        let frame_time = Duration::from_secs_f64(1.0 / FPS);
+        let mut next_frame = Instant::now();
+
         while emu_running.load(Ordering::Relaxed) {
-            let cycles = cpu.step();
-            cycle_accumulator += cycles;
-            cycles_emu.fetch_add(cycles as u64, Ordering::Relaxed);
+            let now = Instant::now();
 
-            cpu.mmu.step_ppu(cycles);
+            if now < next_frame {
+                thread::sleep(next_frame - now);
+            }
 
-            if cycle_accumulator >= CYCLES_PER_FRAME {
-                cycle_accumulator -= CYCLES_PER_FRAME;
+            next_frame += frame_time;
 
+            let mut frame_cycles:u32 = 0;
+            while frame_cycles < CYCLES_PER_FRAME {
+                let cycles = cpu.step();
+                cpu.mmu.step_ppu(cycles);
+
+                frame_cycles += cycles;
+                cycle_accumulator += cycles;
+                cycles_emu.fetch_add(cycles as u64, Ordering::Relaxed);
+            }
+
+            if let Ok(mut shared) = fb_emulator.lock() {
                 let fb = cpu.mmu.get_framebuffer();
-
-                if let Ok(mut shared) = fb_emulator.lock() {
-                    shared.copy_from_slice(fb);
-                }
+                shared.copy_from_slice(fb);
             }
         }
     });
@@ -75,8 +94,8 @@ fn main() {
     let render_thread = thread::spawn(move || {
         let mut window = Window::new(
             "Rusty Emulator",
-            WIDTH * 4,
-            HEIGHT * 4,
+            WIDTH * SCALE,
+            HEIGHT * SCALE,
             WindowOptions::default(),
         )
         .unwrap();
@@ -95,19 +114,13 @@ fn main() {
                 local_buffer.copy_from_slice(&shared);
             }
 
-            window
-                .update_with_buffer(&local_buffer, WIDTH, HEIGHT)
-                .unwrap();
-
-            thread::sleep(Duration::from_millis(1));
+            window.update_with_buffer(&local_buffer, WIDTH, HEIGHT).unwrap();
         }
     });
 
     // =========================
     // TIMING REPORT THREAD 
     // =========================
-    let timing_running = running.clone();
-
     let timing_thread = thread::spawn(move || {
         while timing_running.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_secs(1));

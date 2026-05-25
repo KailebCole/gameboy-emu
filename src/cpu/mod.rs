@@ -937,29 +937,36 @@ impl CPU {
     // Adjusts Accumulator to BCD format after addition or subtraction operations, and updates flags accordingly
     fn daa(&mut self) {
         let mut a = self.registers.a;
-        let mut carry = self.registers.f.carry;
+        let mut adjust = 0;
+        let carry = self.registers.f.carry;
+        let half_carry = self.registers.f.half_carry;
 
-        if !self.registers.f.subtract {
-            if self.registers.f.half_carry || (a & 0x0F) > 0x09 {
-                a = a.wrapping_add(0x06);
+        if self.registers.f.subtract {
+            if half_carry {
+                adjust |= 0x06;
             }
-            if self.registers.f.carry || a > 0x9F {
-                a = a.wrapping_add(0x60);
-                carry = true;
+            if carry {
+                adjust |= 0x60;
             }
+            a = a.wrapping_sub(adjust);
         } else {
-            if self.registers.f.half_carry {
-                a = a.wrapping_sub(0x06);
+            if half_carry || (a & 0x0F) > 0x09 {
+                adjust |= 0x06;
             }
-            if self.registers.f.carry {
-                a = a.wrapping_sub(0x60);
+            if carry || a > 0x99 {
+                adjust |= 0x60;
             }
+            a = a.wrapping_add(adjust);
         }
+
         self.registers.a = a;
 
+        // Set flags
         self.registers.f.zero = a == 0;
         self.registers.f.half_carry = false;
-        self.registers.f.carry = carry;
+        if adjust >= 0x60 {
+            self.registers.f.carry = true;
+        }
     }
 
     // Reset bit b in an 8-bit register or memory location if HL is specified
