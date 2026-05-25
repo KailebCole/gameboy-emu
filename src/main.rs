@@ -20,7 +20,7 @@ const CYCLES_PER_FRAME: u32 = (CPU_CLOCK_HZ / FPS) as u32;
 
 fn main() {
     // =========================
-    // SETUP
+    // SETUP 
     // =========================
     let cart = cart::Cart::new("roms/03.gb");
     let mmu = mmu::MMU::new(cart);
@@ -44,7 +44,7 @@ fn main() {
     let cycles_timing = cycles_executed.clone();
 
     // =========================
-    // EMULATOR THREAD (CPU + PPU)
+    // EMULATOR THREAD
     // =========================
     let emulator_thread = thread::spawn(move || {
         let mut cpu = cpu;
