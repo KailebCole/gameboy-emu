@@ -1,9 +1,11 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 
-use crate::{cpu::{opcodes::{CB_M_CYCLES, CPU_M_CYCLES}, registers::FlagsRegister}, mmu::MMU};
+use crate::{cpu::{opcodes::{CB_M_CYCLES, CPU_M_CYCLES}, registers::FlagsRegister}, mmu::MMU, logger::LOG_FILE};
 mod registers;
 mod opcodes;
+
+const ENABLE_LOGGING: bool = false; 
 
 // List of 8-bit registers for easier access
 #[derive(Copy, Clone, Debug)]
@@ -51,7 +53,9 @@ impl CPU {
 
     // Main execution loop for the CPU, called every frame
     pub fn step(&mut self) -> u32 {
-        //self.log_state();
+        if ENABLE_LOGGING {
+            self.log_state();
+        }
 
         if self.halted {
             self.ticks += 4; // HALT consumes 4 cycles per step
@@ -180,21 +184,21 @@ impl CPU {
         let regs = &self.registers;
         let f = u8::from(regs.f);
         let pc = regs.pc;
-        // Read 4 bytes from memory at PC for PCMEM
-        let pcmem = [
-            self.mmu.read_byte(pc),
-            self.mmu.read_byte(pc.wrapping_add(1)),
-            self.mmu.read_byte(pc.wrapping_add(2)),
-            self.mmu.read_byte(pc.wrapping_add(3)),
-        ];
-        let line = format!(
-            "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}\n",
+
+        let pcmem0 = self.mmu.read_byte(pc);
+        let pcmem1 = self.mmu.read_byte(pc.wrapping_add(1));
+        let pcmem2 = self.mmu.read_byte(pc.wrapping_add(2));
+        let pcmem3 = self.mmu.read_byte(pc.wrapping_add(3));
+
+        let mut buffer = LOG_FILE.lock().unwrap();
+
+        // write! avoids intermediate String allocation
+        let _ = writeln!(
+            buffer,
+            "A:{:02X} F:{:02X} B:{:02X} C:{:02X} D:{:02X} E:{:02X} H:{:02X} L:{:02X} SP:{:04X} PC:{:04X} PCMEM:{:02X},{:02X},{:02X},{:02X}",
             regs.a, f, regs.b, regs.c, regs.d, regs.e, regs.h, regs.l, regs.sp, regs.pc,
-            pcmem[0], pcmem[1], pcmem[2], pcmem[3]
+            pcmem0, pcmem1, pcmem2, pcmem3
         );
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("C:\\Users\\Kaileb\\Documents\\Programs\\gameboy-emu\\log.txt") {
-            let _ = file.write_all(line.as_bytes());
-        }
     }
 
     // Execute CB-prefixed opcodes for bit manipulation and shifts/rotates

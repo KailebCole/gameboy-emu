@@ -10,6 +10,7 @@ mod cart;
 mod cpu;
 mod mmu;
 mod ppu;
+mod logger;
 
 const ROM_PATH: &str = "roms/01.gb";
 
