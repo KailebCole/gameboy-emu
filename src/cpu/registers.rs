@@ -27,21 +27,21 @@ const FLAG_CARRY: u8 = 4;
 impl Registers {
     pub fn new() -> Self {
         Registers {
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0,
-            e: 0,
+            a: 0x01,
+            b: 0x00,
+            c: 0x13,
+            d: 0x00,
+            e: 0xD8,
             f: FlagsRegister {
-                zero: false,
+                zero: true,
                 subtract: false,
-                half_carry: false,
-                carry: false,
+                half_carry: true,
+                carry: true,
             }, 
-            h: 0,
-            l: 0,
+            h: 0x01,
+            l: 0x4D,
             sp: 0xFFFE, // Stack Pointer starts at the end of RAM
-            pc: 0x0000, // Program Counter starts at the beginning of ROM
+            pc: 0x0100, // Program Counter starts at the beginning of ROM
         }
     }
     

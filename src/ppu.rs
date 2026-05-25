@@ -17,7 +17,7 @@ impl PPU {
             cycle: 0,
             lcdc: 0,
             stat: 0,
-            ly: 0,
+            ly: 0x90,
         }
     }
 
